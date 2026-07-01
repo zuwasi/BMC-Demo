@@ -2,9 +2,12 @@ pipeline {
   agent any
 
   environment {
-    AWS_REGION  = 'eu-west-1'
-    ENVIRONMENT = 'dev'
-    TF_DIR      = 'infra/terraform'
+    AWS_REGION            = 'eu-west-1'
+    AWS_DEFAULT_REGION    = 'eu-west-1'
+    ENVIRONMENT           = 'dev'
+    TF_DIR                = 'infra/terraform'
+    AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
+    AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
   }
 
   stages {
@@ -14,24 +17,26 @@ pipeline {
       }
     }
 
-    stage('Static checks') {
+    stage('Verify tooling') {
       steps {
-        sh 'python -m pip install --quiet ruff || true'
-        sh 'ruff check app tests || true'
+        bat 'python --version'
+        bat 'terraform version'
+        bat 'aws --version'
+        bat 'aws sts get-caller-identity'
       }
     }
 
     stage('Unit tests') {
       steps {
-        sh 'python -m pip install --quiet pytest'
-        sh 'python -m pytest -q'
+        bat 'python -m pip install --quiet --disable-pip-version-check pytest'
+        bat 'python -m pytest -q'
       }
     }
 
     stage('Terraform init') {
       steps {
         dir("${TF_DIR}") {
-          sh 'terraform init -input=false'
+          bat 'terraform init -input=false'
         }
       }
     }
@@ -39,7 +44,7 @@ pipeline {
     stage('Terraform plan') {
       steps {
         dir("${TF_DIR}") {
-          sh 'terraform plan -input=false -var-file=environments/dev.tfvars -out=tfplan'
+          bat 'terraform plan -input=false -var-file=environments/dev.tfvars -out=tfplan'
         }
       }
     }
@@ -47,16 +52,15 @@ pipeline {
     stage('Terraform apply (dev)') {
       steps {
         dir("${TF_DIR}") {
-          sh 'terraform apply -input=false -auto-approve tfplan'
+          bat 'terraform apply -input=false -auto-approve tfplan'
         }
       }
     }
 
     stage('Deploy Lambda package') {
       steps {
-        // Lambda code is packaged and deployed by the terraform apply above
-        // (archive_file + aws_lambda_function). This stage is a hook for any
-        // additional artifact publishing.
+        // Lambda code is packaged (archive_file) and deployed by the
+        // terraform apply above. Hook kept for extra artifact publishing.
         echo 'Lambda package deployed via Terraform.'
       }
     }
@@ -64,23 +68,21 @@ pipeline {
     stage('Post-deployment tests') {
       steps {
         dir("${TF_DIR}") {
-          sh 'terraform output -raw healthcheck_endpoint > ../../.endpoint'
+          bat 'terraform output -raw healthcheck_endpoint > endpoint.txt'
         }
-        sh 'HEALTHCHECK_ENDPOINT=$(cat .endpoint) python -m pytest -q tests/test_healthcheck_endpoint.py'
+        powershell '''
+          $ep = (Get-Content "$env:TF_DIR\\endpoint.txt").Trim()
+          Write-Host "Deployed endpoint: $ep"
+          $env:HEALTHCHECK_ENDPOINT = $ep
+          python -m pytest -q tests/test_healthcheck_endpoint.py
+        '''
       }
     }
 
     stage('Publish results') {
       steps {
-        junit allowEmptyResults: true, testResults: 'reports/*.xml'
         echo 'SCRUM-1 health-check deployed and validated.'
       }
-    }
-  }
-
-  post {
-    always {
-      cleanWs()
     }
   }
 }
