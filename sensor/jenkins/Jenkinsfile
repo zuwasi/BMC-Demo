@@ -1,0 +1,89 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION            = 'eu-west-1'
+    AWS_DEFAULT_REGION    = 'eu-west-1'
+    ENVIRONMENT           = 'dev'
+    TF_DIR                = 'sensor/infra'
+    AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
+    AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+    PATH                  = "C:\\Program Files\\Amazon\\AWSCLIV2;${env.PATH}"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Verify tooling') {
+      steps {
+        bat 'docker version'
+        bat 'terraform version'
+        bat 'aws sts get-caller-identity'
+      }
+    }
+
+    stage('Unit tests (local build + run)') {
+      steps {
+        bat 'python -m pip install --quiet --disable-pip-version-check pytest'
+        dir('sensor') {
+          bat 'python -m pytest -q tests'
+        }
+      }
+    }
+
+    stage('Terraform init') {
+      steps { dir("${TF_DIR}") { bat 'terraform init -input=false' } }
+    }
+
+    stage('Create ECR repo') {
+      steps {
+        dir("${TF_DIR}") {
+          bat 'terraform apply -input=false -auto-approve -target=aws_ecr_repository.sensor -var-file=environments/dev.tfvars'
+        }
+      }
+    }
+
+    stage('Build & push image') {
+      steps {
+        script {
+          def repoUrl = bat(returnStdout: true, script: "@cd ${env.TF_DIR} && terraform output -raw ecr_repository_url").trim()
+          def registry = repoUrl.tokenize('/')[0]
+          def tag = "b${env.BUILD_NUMBER}"
+          env.IMAGE_TAG = tag
+          env.ECR_REPO_URL = repoUrl
+          bat "aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin ${registry}"
+          bat "docker build --provenance=false --platform linux/amd64 -t ${repoUrl}:${tag} sensor"
+          bat "docker push ${repoUrl}:${tag}"
+        }
+      }
+    }
+
+    stage('Deploy Lambda (dev)') {
+      steps {
+        dir("${TF_DIR}") {
+          bat "terraform apply -input=false -auto-approve -var-file=environments/dev.tfvars -var image_tag=%IMAGE_TAG%"
+        }
+      }
+    }
+
+    stage('Post-deployment test') {
+      steps {
+        dir("${TF_DIR}") {
+          bat 'terraform output -raw sensor_endpoint > endpoint.txt'
+        }
+        powershell '''
+          $ep = (Get-Content "$env:TF_DIR\\endpoint.txt").Trim()
+          Write-Host "Deployed endpoint: $ep"
+          $env:SENSOR_ENDPOINT = $ep
+          python -m pytest -q sensor/tests
+        '''
+      }
+    }
+
+    stage('Publish results') {
+      steps { echo 'Sensor deployed and validated (expected 30 samples).' }
+    }
+  }
+}

@@ -8,3 +8,15 @@ infra/terraform/*.tfstate
 infra/terraform/*.tfstate.*
 infra/terraform/tfplan
 BMC.txt
+
+# terraform (any subtree)
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+tfplan
+endpoint.txt
+
+# sensor build artifacts
+sensor/sensor.exe
+sensor/sensor.out
